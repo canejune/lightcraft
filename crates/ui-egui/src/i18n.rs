@@ -897,6 +897,16 @@ mod tests {
                 }
             });
         }
+        if lightcraft_engine::CRAFT_FONTS.iter().any(|font| font.serves("Kore")) {
+            set_language(Locale::En);
+            let ctx = fonts_ctx(lightcraft_engine::CRAFT_FONTS);
+            ctx.fonts_mut(|fonts| {
+                let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);
+                for ch in "작업중".chars() {
+                    assert!(fonts.has_glyph(&font, ch), "Korean character {ch} in {font:?}");
+                }
+            });
+        }
         set_language(Locale::En);
     }
 
