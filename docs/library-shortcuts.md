@@ -4,13 +4,19 @@ Select photos in Photo Grid or Square Grid, then use:
 
 | Key | Action |
 |---|---|
+| `Cmd+Shift+D` (macOS) / `Ctrl+Shift+D` (Windows/Linux) | Select only the active photo |
 | `0` | Clear the star rating |
 | `1`–`5` | Set the star rating |
+| `[` / `]` | Decrease / increase each selected photo's rating by one, within 0–5 |
 | `6`, `7`, `8`, `9` | Set a red, yellow, green or blue label |
 | `P` | Flag as a pick |
 | `X` | Flag as rejected |
 | `U` | Clear the flag |
-| `Shift` + any key above | Apply the action and select the next photo |
+| `Shift` + `0`–`9`, `P`, `X` or `U` | Apply the action and select the next photo |
+
+Select Only Active Photo (Edit menu) narrows the selection to the active photo. It does not change
+the photo, its edits or the last edit Undo step, and it works in any view that has an active photo.
+It can be reassigned or disabled in Help → Keyboard Shortcuts; text fields and dialogs keep the key.
 
 Purple and clearing a colour label are available in Photo → Set Color Label and the photo context
 menu. Purple has no default number key, matching Lightroom Classic. Rejection marks a photo for
@@ -21,6 +27,12 @@ Labelled thumbnails have a translucent matching colour on the square-grid surrou
 footer (translucent, over the bottom of the photo) and Detail filmstrip surround. The white active-photo outline remains clear.
 The label confirmation uses a pale matching background with dark text; ratings and errors retain
 their neutral HUD styling. Custom names use the underlying label's colour.
+
+Bracket ratings use each photo's own starting rating, and the changed photos form one Undo / Redo
+step. AutoWrite uses the normal rating metadata path. In Detail, including Masking and Remove,
+`[` / `]` keep resizing the brush and shifted brackets keep adjusting feather. Saved overrides,
+remapping and disabling the default brush bindings take precedence over their grid bracket actions.
+The separate Decrease Rating / Increase Rating commands can also be assigned in Help → Keyboard Shortcuts.
 
 Grid actions apply to all selected photos and support Undo / Redo. In Compare and Survey, culling
 actions apply to the active photo. Auto Advance moves forward after an action; holding Shift with

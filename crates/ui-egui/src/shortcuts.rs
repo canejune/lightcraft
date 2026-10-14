@@ -192,12 +192,16 @@ pub fn format(m: Modifiers, k: Key) -> Option<String> {
 
 /// Secondary key bindings for commands that already exist: `(shortcut, command id, params JSON)`.
 /// They complement the primary shortcut declared on the command (Lightroom-desktop keys that our
-/// primary keymap assigns elsewhere, see docs/parity.md → Shortcuts). Shown in Help → Keyboard Shortcuts.
+/// primary keymap assigns elsewhere, see docs/ui-parity.md → Shortcuts). Shown in Help → Keyboard Shortcuts.
 pub const ALIASES: &[(&str, &str, &str)] = &[
     ("Cmd+D", "library.selectNone", "{}"),
     ("Shift+E", "dialog.export", "{}"),
     ("Cmd+E", "app.exportPrevious", "{}"),
     ("Space", "view.zoomToggle", "{}"),
+    // Lightroom Classic: F6 toggles the filmstrip, F7 the left library panel.
+    // Keep existing primary shortcuts and honour custom keymap assignments.
+    ("F6", "view.filmstrip", "{}"),
+    ("F7", "view.leftPanel", "{}"),
     ("Shift+M", "version.create", "{}"),
     ("Shift+X", "photo.flag", r#"{"flag": "reject", "advance": true}"#),
     ("Shift+Z", "photo.flag", r#"{"flag": "pick", "advance": true}"#),
@@ -260,24 +264,70 @@ pub fn parse(s: &str) -> Option<(Modifiers, Key)> {
 }
 
 fn matches(i: &egui::InputState, m: Modifiers, k: Key) -> bool {
-    i.events.iter().any(|e| match e {
-        egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } => {
-            // `Ctrl` is the physical Control key (on macOS distinct from Cmd; elsewhere Cmd = Ctrl);
-            // "Delete" (⌫ = Backspace) also matches forward-delete
-            let ctrl_ok = if m.ctrl { modifiers.ctrl } else { !modifiers.ctrl || modifiers.command };
-            let cmd_ok = m.ctrl || modifiers.command == m.command;
-            // winit can report shifted digits as punctuation (Shift+1 = `!`). Recognize the
-            // physical number key for culling, without changing layout-aware letter shortcuts.
-            let shifted_digit = m.shift
-                && *physical_key == Some(k)
-                && matches!(k, Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9);
-            (*key == k || shifted_digit || (k == Key::Backspace && *key == Key::Delete))
-                && ctrl_ok
-                && cmd_ok
-                && modifiers.shift == m.shift
-                && modifiers.alt == m.alt
-        }
-        _ => false,
+    // the windowing layer turns ⌘C / ⌘X / ⌘V (with any other modifiers held) and the keyboard's
+    // Copy / Cut / Paste keys into these on Windows and Linux (macOS's menu bar takes them first);
+    // without ⌘/Ctrl held they came from a key that is the plain command (Windows' ⇧Insert pastes)
+    let clipboard = if i.modifiers.command { i.modifiers } else { Modifiers::COMMAND };
+    i.events.iter().any(|e| {
+        let (key, physical_key, modifiers) = match e {
+            egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } => (key, physical_key, modifiers),
+            egui::Event::Copy => (&Key::C, &None, &clipboard),
+            egui::Event::Cut => (&Key::X, &None, &clipboard),
+            egui::Event::Paste(_) => (&Key::V, &None, &clipboard),
+            _ => return false,
+        };
+        // `Ctrl` is the physical Control key (on macOS distinct from Cmd; elsewhere Cmd = Ctrl);
+        // "Delete" (⌫ = Backspace) also matches forward-delete
+        let ctrl_ok = if m.ctrl { modifiers.ctrl } else { !modifiers.ctrl || modifiers.command };
+        let cmd_ok = m.ctrl || modifiers.command == m.command;
+        // winit can report shifted digits as punctuation (Shift+1 = `!`). Recognize the
+        // physical number key for culling, without changing layout-aware letter shortcuts.
+        let shifted_digit = m.shift
+            && *physical_key == Some(k)
+            && matches!(k, Key::Num0 | Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9);
+        (*key == k || shifted_digit || (k == Key::Backspace && *key == Key::Delete))
+            && ctrl_ok
+            && cmd_ok
+            && modifiers.shift == m.shift
+            && modifiers.alt == m.alt
+    })
+}
+
+/// Default brackets rate in grids. Remapped brush keys retain their brush action, and a
+/// saved assignment of either bracket to another command takes precedence over this default.
+fn grid_bracket_command(keymap: &Keymap, grid: bool, id: &'static str, shortcut: (Modifiers, Key)) -> Option<&'static str> {
+    let command = match (grid, id, shortcut) {
+        (true, "brush.smaller", (m, Key::OpenBracket)) if m == Modifiers::NONE => "photo.decreaseRating",
+        (true, "brush.larger", (m, Key::CloseBracket)) if m == Modifiers::NONE => "photo.increaseRating",
+        _ => return Some(id),
+    };
+    if keymap.iter().any(|(other, sc)| other != id && find_bindable(other).is_some() && parse(sc) == Some(shortcut)) { None } else { Some(command) }
+}
+
+/// Content widgets keep keyboard ownership, including text fields and arrow-driven sliders.
+/// Dock chrome owns activation, traversal, resizing and cancellation; its other keys reach commands.
+fn keyboard_owned(app: &LightcraftApp, ctx: &egui::Context) -> bool {
+    if !ctx.egui_wants_keyboard_input() {
+        // Escape drops egui focus before shortcuts run; keep the numeric edit's whole input batch.
+        return ctx.input(|input| input.key_pressed(Key::Escape))
+            && app.widgets.iter().any(|(widget, _)| widget.starts_with("sliderField:") && crate::text_field::was_editing(ctx, widget));
+    }
+    // a selected slider keeps its arrow keys; everything else is a shortcut
+    if crate::widgets::slider_has_focus(ctx) {
+        return ctx.input(|input| [Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown].iter().any(|key| input.key_pressed(*key)));
+    }
+    let chrome = app
+        .ui
+        .docking
+        .as_ref()
+        .is_some_and(|workspace| craft_ui::docking::DockArea::new(egui::Id::new("lightcraft-docking")).chrome_has_focus(ctx, &workspace.layout));
+    if !chrome {
+        return true;
+    }
+    ctx.input(|input| {
+        [Key::Enter, Key::Space, Key::Tab, Key::Escape, Key::ArrowLeft, Key::ArrowRight, Key::ArrowUp, Key::ArrowDown]
+            .iter()
+            .any(|key| input.key_pressed(*key))
     })
 }
 
@@ -285,8 +335,12 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
     if !matches!(app.ui.dialog, Some(crate::state::Dialog::Shortcuts)) {
         app.recording_shortcut = None;
     }
+    // Dialogs own their keys (including Esc and text editing); background photo actions wait.
+    if app.ui.dialog.is_some() {
+        return;
+    }
     // don't steal keys from text fields or from the keymap editor recording a shortcut
-    if ctx.egui_wants_keyboard_input() || app.recording_shortcut.is_some() || app.ui.name_edit.is_some() {
+    if keyboard_owned(app, ctx) || app.recording_shortcut.is_some() || app.ui.name_edit.is_some() {
         return;
     }
     let mut fire: Vec<String> = Vec::new();
@@ -294,20 +348,29 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
     let native = |sc: &str| app.native_shortcuts.contains(sc);
     let mut aliased: Vec<(&str, serde_json::Value)> = Vec::new();
     let keymap = &app.ui.settings.keymap;
+    let grid = library_grid(app);
     // keys the user gave to a command: the fixed bindings below (aliases, ratings) yield to them
     let taken: Vec<(Modifiers, Key)> = keymap.values().filter_map(|s| parse(s)).collect();
+    // an open popup (a menu, a date picker's calendar) closes on Esc itself: Esc's command (Back,
+    // which also closes dialogs) waits until nothing is open
+    let popup_open = egui::Popup::is_any_open(ctx);
+    // Esc that just took a text field's focus away (it gives back the field's text) does nothing else
+    let popup_open = popup_open || app.text_focus;
     ctx.input(|i| {
         for b in bindable() {
             if let Some(sc) = binding(keymap, b.id, b.default)
                 && let Some((m, k)) = parse(sc)
                 && !native(sc)
+                && !(k == Key::Escape && popup_open)
                 && matches(i, m, k)
+                && let Some(id) = grid_bracket_command(keymap, grid, b.id, (m, k))
             {
-                fire.push(b.id.to_string());
+                fire.push(id.to_string());
             }
         }
         for (sc, id, params) in ALIASES {
             if let Some((m, k)) = parse(sc).filter(|_| !native(sc))
+                && !(k == Key::Escape && popup_open)
                 && !taken.contains(&(m, k))
                 && matches(i, m, k)
             {
@@ -375,6 +438,8 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
                 crate::i18n::tr_format!("Rated {}", "★".repeat(n.parse().unwrap_or(0)))
             };
             app.toast(ctx, label);
+        } else if matches!(f.as_str(), "photo.decreaseRating" | "photo.increaseRating") {
+            cull(app, &f, json!({}), false);
         } else if let Some(l) = f.strip_prefix("label:") {
             cull(app, "photo.label", json!({"label": l}), false);
         } else if f == "panel.presets" && library_grid(app) {
@@ -471,6 +536,25 @@ pub fn handle(app: &mut LightcraftApp, ctx: &egui::Context) {
                     continue;
                 }
             }
+            // Up / Down in the grids go to the cell above / below (the filmstrip steps one photo)
+            if matches!(f.as_str(), "library.up" | "library.down") {
+                // over a slider the arrows nudge it (widgets::slider takes the key)
+                let over_slider =
+                    ctx.pointer_hover_pos().is_some_and(|p| app.widgets.iter().any(|(id, r)| id.starts_with("slider:") && r.contains(p)));
+                if over_slider {
+                    continue;
+                }
+                match crate::panels::grid::row_distance(app, f == "library.down") {
+                    Some(0) => {}
+                    Some(rows) => {
+                        let _ = app.run(&f, json!({"rows": rows}));
+                    }
+                    None => {
+                        let _ = app.run(&f, json!({}));
+                    }
+                }
+                continue;
+            }
             // an export that can't start (e.g. no folder) says why instead of doing nothing
             if let Err(e) = app.run(&f, json!({}))
                 && matches!(f.as_str(), "app.export" | "app.exportPrevious")
@@ -527,6 +611,74 @@ mod tests {
         assert_eq!(r["ok"], true, "{r}");
     }
 
+    /// Press the default Select Only Active Photo chord (the command key on every platform).
+    fn select_only_active_chord(h: &mut crate::headless::Headless) {
+        let r = h.request("ui.key", json!({"key": "D", "cmd": true, "shift": true}), std::time::Duration::from_secs(20));
+        assert_eq!(r["ok"], true, "{r}");
+    }
+
+    #[test]
+    fn select_only_active_keeps_the_active_photo_and_the_edit_undo_step() {
+        use crate::state::ViewMode;
+        use lightcraft_catalog::PhotoId;
+        for view in [ViewMode::PhotoGrid, ViewMode::SquareGrid, ViewMode::Detail] {
+            let mut h = library();
+            h.app.ui.view = view;
+            h.app.session.execute("library.select", &json!({"ids": [1, 2, 3], "active": 2})).unwrap();
+            h.app.session.execute("photo.rate", &json!({"rating": 4})).unwrap();
+            select_only_active_chord(&mut h);
+            assert_eq!(h.app.session.selection.ids, vec![PhotoId(2)]);
+            assert_eq!(h.app.session.active(), Some(PhotoId(2)));
+            // Narrowing the selection does not replace the last photo-edit undo step.
+            h.app.session.execute("edit.undo", &json!({})).unwrap();
+            for id in 1..=3 {
+                assert_eq!(h.app.session.catalog.photo(PhotoId(id)).unwrap().rating, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn select_only_active_yields_to_a_focused_text_field() {
+        use lightcraft_catalog::PhotoId;
+        let mut h = library();
+        h.app.session.execute("library.select", &json!({"ids": [1, 2], "active": 2})).unwrap();
+        let r = h.request("ui.clickWidget", json!({"id": "field:search"}), std::time::Duration::from_secs(20));
+        assert_eq!(r["ok"], true, "{r}");
+        select_only_active_chord(&mut h);
+        assert_eq!(h.app.session.selection.ids, vec![PhotoId(1), PhotoId(2)]);
+        assert_eq!(h.app.session.active(), Some(PhotoId(2)));
+    }
+
+    #[test]
+    fn select_only_active_follows_the_keymap() {
+        use lightcraft_catalog::PhotoId;
+        let mut h = library();
+        let both = vec![PhotoId(1), PhotoId(2)];
+        h.app.session.execute("library.select", &json!({"ids": [1, 2], "active": 2})).unwrap();
+        assert_eq!(super::shortcut_of(&h.app.ui.settings.keymap, "library.selectOnlyActive"), Some("Cmd+Shift+D"));
+        // unbound: the default chord does nothing
+        super::assign(&mut h.app.ui.settings.keymap, "library.selectOnlyActive", None).unwrap();
+        select_only_active_chord(&mut h);
+        assert_eq!(h.app.session.selection.ids, both);
+        // rebound: the new key narrows the selection and the old chord still does not
+        super::assign(&mut h.app.ui.settings.keymap, "library.selectOnlyActive", Some("F9")).unwrap();
+        select_only_active_chord(&mut h);
+        assert_eq!(h.app.session.selection.ids, both);
+        key(&mut h, "F9", false);
+        assert_eq!(h.app.session.selection.ids, vec![PhotoId(2)]);
+    }
+
+    #[test]
+    fn select_only_active_without_active_photo_does_not_change_selection() {
+        let mut h = library();
+        // Deselect All keeps the active photo selected, so clear the whole selection state instead.
+        h.app.session.selection = Default::default();
+        assert!(!crate::menus::ui_enabled(&h.app, "library.selectOnlyActive"));
+        assert!(h.app.run("library.selectOnlyActive", json!({})).is_err());
+        select_only_active_chord(&mut h);
+        assert!(h.app.session.selection.ids.is_empty());
+    }
+
     #[test]
     fn library_rating_labels_flags_and_undo() {
         use lightcraft_catalog::{ColorLabel, Flag, PhotoId};
@@ -557,6 +709,20 @@ mod tests {
             assert_eq!(h.app.session.catalog.photo(PhotoId(1)).unwrap().flag, Flag::None);
             assert_eq!(h.app.session.active(), Some(PhotoId(1)));
         }
+    }
+
+    #[test]
+    fn classic_f6_and_f7_toggle_the_filmstrip_and_left_panel() {
+        let mut h = library();
+        let (filmstrip, left) = (h.app.ui.filmstrip, h.app.ui.left_panel);
+        key(&mut h, "F6", false);
+        assert_eq!(h.app.ui.filmstrip, !filmstrip);
+        assert_eq!(h.app.ui.left_panel, left);
+        key(&mut h, "F7", false);
+        assert_eq!(h.app.ui.left_panel, !left);
+        key(&mut h, "F6", false);
+        key(&mut h, "F7", false);
+        assert_eq!((h.app.ui.filmstrip, h.app.ui.left_panel), (filmstrip, left));
     }
 
     #[test]
@@ -844,3 +1010,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shortcuts/tests_relative_ratings.rs"]
+mod relative_rating_tests;
